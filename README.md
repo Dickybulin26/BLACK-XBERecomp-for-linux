@@ -6,12 +6,123 @@ This port was created using the [Xbox XBE Recomp](https://github.com/TGP482/Xbox
 > [!NOTE]
 > This project does not include any game assets. You must provide the files from your own legally acquired copy of the game to install or build.
 
-## Installation
+## Installation (Windows)
 - Put your game files in the `assets` folder. This can be an ISO, or the extracted data files, of the USA or Europe release.
 - Run `BLACK.exe`.
 - Recomp settings can be adjusted in the in-game options menu while the game is running, or through the Settings overlay, which is opened with F10 by default.
+- Linux users: skip this and follow [Linux (Proton)](#linux-proton) below.
 <img width="1920" height="1080" alt="{5852D359-24A0-48C8-9319-07C3A619E355}" src="https://github.com/user-attachments/assets/e0156eb8-c1b5-49d9-ab93-3abb46bf5f47" />
 
+## Linux (Proton)
+
+This port ships as a Windows binary (`Direct3D 12` + `XAudio2`). On Linux we run that same binary through **Proton**, which translates D3D12 to Vulkan via `vkd3d-proton` so your GPU still does the real work. No game code is changed. The `linux/` folder contains the launcher.
+
+Think of it as: `BLACK.exe` → `run-proton.sh` → Proton → your GPU.
+
+### 1. What you need
+
+- 64-bit Linux (tested on Arch/Hyprland, should work on Ubuntu/Fedora).
+- A Vulkan-capable GPU with proprietary or Mesa drivers. Tested on NVIDIA RTX 3050 Laptop. Check yours:
+  ```bash
+  nvidia-smi -L        # NVIDIA
+  vulkaninfo --summary # any vendor, install `vulkan-tools` if missing
+  ```
+- Steam installed and logged in.
+- **Proton Hotfix** installed:
+  1. Open Steam → `Library`.
+  2. Enable the `Tools` filter (dropdown above the game list).
+  3. Search `Proton Hotfix` → `Install`.
+  4. Expected path afterwards: `~/.local/share/Steam/steamapps/common/Proton Hotfix/proton`.
+- Your own legally acquired copy of Black (Xbox USA or Europe). This repo contains no game data.
+
+### 2. Prepare the game folder
+
+You need a folder that looks like this. It can live anywhere, e.g. `~/Games/BLACK/`:
+
+```
+~/Games/BLACK/
+├── BLACK.exe            # from Releases, see below
+├── d3dcompiler_47.dll   # ships next to BLACK.exe in the Release zip
+├── black.toml           # optional, copy from linux/black.toml.default
+└── assets/              # your game dump
+    ├── default.xbe
+    ├── GlobData.bin
+    ├── chars/ data/ export/ language/ levels/ sound/ videos/
+    └── (or a single .iso of the game disc)
+```
+
+Steps:
+
+1. Clone this launcher repo:
+   ```bash
+   git clone https://github.com/Dickybulin26/BLACK-XBERecomp-for-linux.git
+   cd BLACK-XBERecomp-for-linux
+   ```
+2. Download prebuilt `BLACK.exe` (+ `d3dcompiler_47.dll`) from [Upstream Releases](https://github.com/TGP482/BLACK-XBERecomp/releases). Upstream only ships Windows binaries.
+3. Create your game folder and copy those files in:
+   ```bash
+   mkdir -p ~/Games/BLACK/assets
+   cp BLACK.exe d3dcompiler_47.dll ~/Games/BLACK/
+   ```
+4. Copy your Xbox dump into `~/Games/BLACK/assets/`. Either the full extracted files (`default.xbe` + `GlobData.bin` + folders above) or the disc `.iso`.
+5. Optional but recommended — copy default settings:
+   ```bash
+   cp linux/black.toml.default ~/Games/BLACK/black.toml
+   ```
+
+> [!NOTE]
+> `GAME_DIR` in the commands below always means the folder that contains `BLACK.exe`, e.g. `~/Games/BLACK`. It is not the repo folder unless you put `BLACK.exe` there.
+
+### 3. Run the game
+
+```bash
+GAME_DIR=~/Games/BLACK ./linux/run-proton.sh
+```
+
+What happens on first run:
+- A Wine prefix is created in `~/Games/BLACK/compatdata/`. This is normal and takes ~30s.
+- The game window opens. Press `F10` in-game to open Recomp Settings (resolution, fullscreen/borderless, mouse sensitivity, FPS cap).
+- If `assets/` is empty the script warns you but still tries to boot so you can verify Proton works.
+
+Make scripts executable if needed:
+```bash
+chmod +x linux/run-proton.sh linux/debug-proton.sh
+```
+
+### 4. Optional: app menu / rofi shortcut
+
+Install a launcher entry with the BLACK cover art as its icon:
+
+```bash
+GAME_DIR=~/Games/BLACK ./linux/install-menu-entry.sh
+```
+
+- `GAME_DIR` tells it where `BLACK.exe` + `assets/` live (defaults to `~/Games/BLACK`).
+- It copies `linux/black.png` to `~/.local/share/icons/black-xberecomp/` and writes a `.desktop` file to `~/.local/share/applications/`.
+- Remove everything it installed with `./linux/install-menu-entry.sh --remove`.
+- Black now appears in your app launcher / rofi.
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `ERROR: Proton not found` | Install Proton Hotfix (see step 1) or set `PROTON_DIR=/path/to/proton GAME_DIR=~/Games/BLACK ./linux/run-proton.sh`. |
+| `ERROR: BLACK.exe not found` | You pointed `GAME_DIR` to the wrong folder. It must contain `BLACK.exe`. Example: `GAME_DIR=~/Games/BLACK`. |
+| No window / crash on boot | Run `GAME_DIR=~/Games/BLACK ./linux/debug-proton.sh`, then open the newest `proton-*.log` in `GAME_DIR`. Look for `vkd3d`, `d3d12`, `err`. |
+| Black screen but audio plays | GPU not picked up. Run `nvidia-smi dmon` while the game runs — you should see `BLACK.exe`. On laptops, force discrete GPU / disable iGPU offload. |
+| Window misbehaves on Wayland/Hyprland | Uncomment `PROTON_ENABLE_WAYLAND=1` in `linux/run-proton.sh` and retry. |
+| Save shows as **damaged** | Expected. Saves are signed with the original Xbox EEPROM key. Start a new save; do not reuse downloads from other consoles. See `hdd/E/UDATA/<title-id>/` under `GAME_DIR`. |
+
+Still stuck? Include in your issue: distro + GPU + driver version, Proton version, and the `vkd3d/d3d12/err` lines from the debug log.
+
+### Notes
+- **Saves:** `$GAME_DIR/hdd/E/UDATA/<title-id>/`.
+- **Settings:** `black.toml` next to `BLACK.exe`. See `linux/black.toml.default`.
+- **Updating:** replace `BLACK.exe` with the newer Release, keep `assets/`, `black.toml`, `compatdata/`.
+- **Uninstall:** `./linux/install-menu-entry.sh --remove`, then delete `GAME_DIR`. Nothing is installed to your system.
+
+> [!IMPORTANT]
+> This Linux launcher is a community add-on. It does not modify the game port itself. All game code, the recompiler, and the renderer come from the original project below — please support the upstream author.
 
 ## Features
 ### Display
@@ -85,3 +196,8 @@ Install [Visual Studio 2022](https://visualstudio.microsoft.com/downloads/) and 
 ### 4. Build the Project
 - Run `build.bat`. The first build recompiles the entire game and can take 30 to 90 minutes on weaker systems.
 - When it finishes, run `out\build\release\BLACK.exe`.
+
+## Credits
+- **[TGP482](https://github.com/TGP482)** — original author of [BLACK - XBE Recomp](https://github.com/TGP482/BLACK-XBERecomp) and the [Xbox XBE Recomp](https://github.com/TGP482/XboxXBE-Recomp) tool. All game code, the recompiler, the Direct3D 12 renderer and every feature listed above are their work.
+- This repo is an unofficial fork that adds only a **Linux launcher** (`linux/`) wrapping the upstream Windows build in Proton. No game code was changed.
+- If you enjoy this port, please star and support the [upstream project](https://github.com/TGP482/BLACK-XBERecomp).
