@@ -8,8 +8,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-GAME_DIR="${GAME_DIR:-$(dirname -- "$SCRIPT_DIR")}"
-EXE="$GAME_DIR/BLACK.exe"
+REPO_DIR="$(dirname -- "$SCRIPT_DIR")"
 PROTON_DIR="${PROTON_DIR:-$HOME/.local/share/Steam/steamapps/common/Proton Hotfix/proton}"
 STEAM_DIR="${STEAM_DIR:-$HOME/.local/share/Steam}"
 
@@ -18,11 +17,25 @@ if [ ! -x "$PROTON_DIR" ]; then
     echo "  Install it via Steam -> Library -> Tools filter -> 'Proton Hotfix' -> Install."
     exit 1
 fi
-if [ ! -f "$EXE" ]; then
-    echo "ERROR: $EXE not found. Set GAME_DIR to the folder containing BLACK.exe."
-    echo "  Example: GAME_DIR=~/Games/BLACK ./linux/debug-proton.sh"
+
+find_game_dir() {
+    local c
+    for c in "$REPO_DIR" "$HOME/Games/BLACK" "$HOME/Games/BLACK-XBERecomp" "$HOME/BLACK"; do
+        [ -f "$c/BLACK.exe" ] && { echo "$c"; return 0; }
+    done
+    c="$(find "$HOME/Games" -maxdepth 3 -iname BLACK.exe -print -quit 2>/dev/null || true)"
+    [ -n "$c" ] && { dirname -- "$c"; return 0; }
+    return 1
+}
+
+if [ -n "${GAME_DIR:-}" ]; then
+    GAME_DIR="$(cd -- "$GAME_DIR" && pwd)" || exit 1
+elif ! GAME_DIR="$(find_game_dir)"; then
+    echo "ERROR: could not find BLACK.exe."
+    echo "  Point at your game folder: GAME_DIR=~/Games/BLACK ./linux/debug-proton.sh"
     exit 1
 fi
+EXE="$GAME_DIR/BLACK.exe"
 
 export STEAM_COMPAT_DATA_PATH="$GAME_DIR/compatdata"
 export STEAM_COMPAT_CLIENT_INSTALL_PATH="$STEAM_DIR"

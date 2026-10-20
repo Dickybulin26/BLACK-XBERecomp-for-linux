@@ -71,22 +71,29 @@ Steps:
    ```
 
 > [!NOTE]
-> `GAME_DIR` in the commands below always means the folder that contains `BLACK.exe`, e.g. `~/Games/BLACK`. It is not the repo folder unless you put `BLACK.exe` there.
+> `GAME_DIR` means the folder that contains `BLACK.exe`, e.g. `~/Games/BLACK`. It is now **optional**: the launcher auto-detects it (repo folder, `~/Games/BLACK`, `~/Games/BLACK-XBERecomp`, `~/BLACK`, then a shallow search under `~/Games`). Only set it if your game lives somewhere else.
 
 ### 3. Run the game
+
+```bash
+./linux/run-proton.sh
+```
+
+If the game is not auto-detected, point at it explicitly:
 
 ```bash
 GAME_DIR=~/Games/BLACK ./linux/run-proton.sh
 ```
 
 What happens on first run:
+- The launcher prints which game folder, Proton and prefix it picked, then starts `BLACK.exe`.
 - A Wine prefix is created in `~/Games/BLACK/compatdata/`. This is normal and takes ~30s.
 - The game window opens. Press `F10` in-game to open Recomp Settings (resolution, fullscreen/borderless, mouse sensitivity, FPS cap).
 - If `assets/` is empty the script warns you but still tries to boot so you can verify Proton works.
 
 Make scripts executable if needed:
 ```bash
-chmod +x linux/run-proton.sh linux/debug-proton.sh
+chmod +x linux/*.sh
 ```
 
 ### 4. Optional: app menu / rofi shortcut
@@ -107,8 +114,8 @@ GAME_DIR=~/Games/BLACK ./linux/install-menu-entry.sh
 | Symptom | Fix |
 |---|---|
 | `ERROR: Proton not found` | Install Proton Hotfix (see step 1) or set `PROTON_DIR=/path/to/proton GAME_DIR=~/Games/BLACK ./linux/run-proton.sh`. |
-| `ERROR: BLACK.exe not found` | You pointed `GAME_DIR` to the wrong folder. It must contain `BLACK.exe`. Example: `GAME_DIR=~/Games/BLACK`. |
-| No window / crash on boot | Run `GAME_DIR=~/Games/BLACK ./linux/debug-proton.sh`, then open the newest `proton-*.log` in `GAME_DIR`. Look for `vkd3d`, `d3d12`, `err`. |
+| `ERROR: could not find BLACK.exe` | Auto-detect failed. Set `GAME_DIR` to the folder containing `BLACK.exe`, e.g. `GAME_DIR=~/Games/BLACK ./linux/run-proton.sh`. Or put `BLACK.exe` + `d3dcompiler_47.dll` + `assets/` in this repo folder. |
+| No window / crash on boot | Run `./linux/debug-proton.sh` (auto-detects too), then open the newest `proton-*.log` in `GAME_DIR`. Look for `vkd3d`, `d3d12`, `err`. |
 | Black screen but audio plays | GPU not picked up. Run `nvidia-smi dmon` while the game runs — you should see `BLACK.exe`. On laptops, force discrete GPU / disable iGPU offload. |
 | Window misbehaves on Wayland/Hyprland | Uncomment `PROTON_ENABLE_WAYLAND=1` in `linux/run-proton.sh` and retry. |
 | Save shows as **damaged** | Expected. Saves are signed with the original Xbox EEPROM key. Start a new save; do not reuse downloads from other consoles. See `hdd/E/UDATA/<title-id>/` under `GAME_DIR`. |
