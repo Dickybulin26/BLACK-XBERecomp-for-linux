@@ -20,10 +20,10 @@ constexpr Entry kEntries[] = {
     // options menu pages and the RECOMP SETTINGS sections
     {"RECOMP SETTINGS", {u"Paramètres Recomp", u"Recomp-Einstellungen", u"Impostazioni Recomp", u"Configuración de Recomp"}},
     {"MOUSE AND KEYBOARD", {u"Souris et clavier", u"Maus und Tastatur", u"Mouse e tastiera", u"Ratón y teclado"}},
+    {"CONTROLLER", {u"Manette", u"Controller", u"Controller", u"Mando"}},
     {"GENERAL", {u"Général", u"Allgemein", u"Generale", u"General"}},
     {"DISPLAY", {u"Affichage", u"Anzeige", u"Video", u"Pantalla"}},
     {"GRAPHICS", {u"Graphismes", u"Grafik", u"Grafica", u"Gráficos"}},
-    {"PAGE", {u"Page", u"Seite", u"Pagina", u"Página"}},
     {"RESTORE DEFAULTS", {u"Rétablir les valeurs par défaut", u"Standard wiederherstellen", u"Ripristina predefiniti", u"Restaurar predeterminados"}},
     {"PRESS A KEY", {u"Appuyez sur une touche", u"Taste drücken", u"Premi un tasto", u"Pulsa una tecla"}},
     {"UNBOUND", {u"Non assigné", u"Nicht belegt", u"Non assegnato", u"Sin asignar"}},
@@ -46,6 +46,7 @@ constexpr Entry kEntries[] = {
     {"AMBIENT OCCLUSION", {u"Occlusion ambiante", u"Ambient Occlusion", u"Occlusione ambientale", u"Oclusión ambiental"}},
     {"RELOAD BLUR", {u"Flou au rechargement", u"Nachlade-Unschärfe", u"Sfocatura in ricarica", u"Desenfoque al recargar"}},
     {"SKIP INTROS", {u"Passer les intros", u"Intros überspringen", u"Salta introduzione", u"Saltar introducción"}},
+    {"MENU ANIMATIONS", {u"Animations des menus", u"Menüanimationen", u"Animazioni dei menu", u"Animaciones de los menús"}},
     {"PAUSE ON FOCUS LOSS", {u"Pause en arrière-plan", u"Pause im Hintergrund", u"Pausa in background", u"Pausa en segundo plano"}},
     {"LANGUAGE", {u"Langue", u"Sprache", u"Lingua", u"Idioma"}},
     {"AUDIO OUTPUT", {u"Sortie audio", u"Audioausgabe", u"Uscita audio", u"Salida de audio"}},
@@ -105,6 +106,13 @@ constexpr Entry kEntries[] = {
     {"LOOK DOWN", {u"Regarder en bas", u"Nach unten sehen", u"Guarda in basso", u"Mirar abajo"}},
     {"LOOK LEFT", {u"Regarder à gauche", u"Nach links sehen", u"Guarda a sinistra", u"Mirar a la izquierda"}},
     {"LOOK RIGHT", {u"Regarder à droite", u"Nach rechts sehen", u"Guarda a destra", u"Mirar a la derecha"}},
+
+    // CONTROLLER rows
+    {"SENSITIVITY", {u"Sensibilité", u"Empfindlichkeit", u"Sensibilità", u"Sensibilidad"}},
+    {"RUMBLE INTENSITY", {u"Intensité des vibrations", u"Vibrationsstärke", u"Intensità della vibrazione", u"Intensidad de la vibración"}},
+    {"AIM ASSIST", {u"Aide à la visée", u"Zielhilfe", u"Mira assistita", u"Asistencia de apuntado"}},
+    {"GYRO AIMING", {u"Visée gyroscopique", u"Gyro-Zielen", u"Mira giroscopica", u"Apuntado con giroscopio"}},
+    {"GYRO SENSITIVITY", {u"Sensibilité du gyroscope", u"Gyro-Empfindlichkeit", u"Sensibilità del giroscopio", u"Sensibilidad del giroscopio"}},
 
     // a hint's "PRESS (A) :" with the key in place of the button
     {"PRESS", {u"Appuyez sur", u"Drücke", u"Premi", u"Pulsa"}},

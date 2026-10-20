@@ -22,6 +22,10 @@
 
 using namespace kernel;
 
+namespace dispatch {
+bool InCode(uint32_t va);  // cpu/dispatch.cpp
+}
+
 // configs written before the SDK knew the name
 #ifndef SYM_D3DDevice_BeginPush
 #define SYM_D3DDevice_BeginPush FFFFFE00
@@ -208,6 +212,7 @@ struct Fog {
     float start = 0;
     float end = 0;
     float limit = 0;
+    uint32_t colour = 0;  // ARGB
 };
 Fog g_fog;
 
@@ -220,7 +225,8 @@ float StateFloat(uint32_t rs) {
 void LatchFog() {
     bool program = (g_state.vs_handle & 1) != 0;
     if (!program || !g_state.rs[gpu::kRsFogEnable] || g_state.rs[gpu::kRsFogTableMode] != kFogLinear) return;
-    g_fog = {StateFloat(gpu::kRsFogStart), StateFloat(gpu::kRsFogEnd), g_state.vsc[kFogLimit][2]};
+    g_fog = {StateFloat(gpu::kRsFogStart), StateFloat(gpu::kRsFogEnd), g_state.vsc[kFogLimit][2],
+             g_state.rs[gpu::kRsFogColor]};
 }
 
 // fog amount at view depth z: min(saturate(slope * z + offset), most)
@@ -238,14 +244,19 @@ FogFade FogOverDepth(const float* m) {
     return {m[10] / range, (m[14] - g_fog.start) / range, most};
 }
 
+// one channel of an ARGB colour, 0 to 1
+float Channel(uint32_t argb, uint32_t shift) { return float((argb >> shift) & 0xFF) / 255.0f; }
+
 float ZScale(const gpu::Surface& zs) {
     uint32_t f = zs.header ? (zs.format >> 8) & 0xFF : 0x2E;
     return f == 0x2C || f == 0x30 ? 65535.0f : 16777215.0f;
 }
 
 float g_view_scale = 1.0f;
+float g_near_depth = 0.0f;
 
-// c-38 and c-37 hold the viewport scale and offset, as D3D_GetViewportOffsetAndScale computes them
+// c-38 and c-37 hold the viewport scale and offset, as D3D_GetViewportOffsetAndScale computes them.
+// The scale's unused w carries NearDepth's plane to the host shaders
 constexpr uint32_t kViewportScale = 58;
 constexpr uint32_t kViewportOffset = 59;
 
@@ -254,7 +265,8 @@ void UpdateViewportConstants() {
     g_state.zscale = ZScale(g_state.zs);
     float hw = v.w * 0.5f;
     float hh = v.h * 0.5f;
-    g_state.vsc[kViewportScale] = {hw * g_view_scale, -hh * g_view_scale, (v.max_z - v.min_z) * g_state.zscale, 0};
+    g_state.vsc[kViewportScale] = {hw * g_view_scale, -hh * g_view_scale, (v.max_z - v.min_z) * g_state.zscale,
+                                     g_near_depth};
     float x = v.x + g_state.ss_offset_x + hw;
     float y = v.y + g_state.ss_offset_y + hh;
     g_state.vsc[kViewportOffset] = {x, y, v.min_z * g_state.zscale, 0};
@@ -287,16 +299,26 @@ void ViewScale(float xy) {
     UpdateViewportConstants();
 }
 
+// draws keep what lies nearer than the plane at this view depth (0 off), in order, in front of what lies past it
+void NearDepth(float plane) {
+    std::lock_guard<std::recursive_mutex> lock(g_lock);
+    g_near_depth = plane;
+    UpdateViewportConstants();
+}
+
 // sent as p: 1 / the projection's x and y scale, its x and y centre, then view z = p[4] / (ndc depth - p[5]),
-// then p[6]: 1 for GTAO, 0 for SSAO, then the fog already drawn: min(saturate(p[8] * view z + p[9]), p[10])
+// then p[6]: 1 for GTAO, 0 for SSAO, then the fog already drawn: min(saturate(p[8] * view z + p[9]), p[10]),
+// then its colour p[12] to p[14]
 void Occlusion(const float* m, bool gtao) {
     std::lock_guard<std::recursive_mutex> lock(g_lock);
     bool perspective = m[11] == 1.0f && m[15] == 0.0f;
     if (!g_backend || !perspective || !m[0] || !m[5]) return;
     float mode = gtao ? 1.0f : 0.0f;
     FogFade fog = FogOverDepth(m);
+    uint32_t colour = g_fog.colour;
     const float p[4 * gpu::kOcclusionRects] = {1 / m[0], 1 / m[5], m[8], m[9], m[14], m[10], mode, 0,
-                                               fog.slope, fog.offset, fog.most, 0};
+                                               fog.slope, fog.offset, fog.most, 0,
+                                               Channel(colour, 16), Channel(colour, 8), Channel(colour, 0), 0};
     const uint8_t* rects = reinterpret_cast<const uint8_t*>(p);
     g_backend->Clear(g_state, gpu::kOcclusionRects, rects, gpu::kClearOcclusion, 0, 0, 0);
 }
@@ -421,7 +443,7 @@ void LogBlockOnce(X86Context& ctx, uint32_t data) {
     uint32_t n = 0;
     for (uint32_t i = 0; i < 32 && n < 4; i++) {
         uint32_t v = R32(ctx.esp + i * 4);
-        if (v >= X86CodeBase && v < X86CodeEnd) code[n++] = v;
+        if (dispatch::InCode(v)) code[n++] = v;
     }
     LOGI("d3d: BlockOnResource on surface %08X, stack %08X %08X %08X %08X", data, code[0], code[1], code[2], code[3]);
 }

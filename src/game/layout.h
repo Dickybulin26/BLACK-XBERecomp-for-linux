@@ -22,6 +22,7 @@ constexpr uint32_t kFilmTable = 0x29D9C0;
 constexpr uint32_t kFilmEntry = 12;
 constexpr uint32_t kFilmBehindMenu = 8;  // byte: the film runs behind a menu
 constexpr uint32_t kFilms = 27;
+constexpr uint32_t kLogoFilm = 1;  // LO_, the EA intro
 
 // timer: whole steps and parts of a step over the divisor, the step's dt and the time
 constexpr uint32_t kTimerWholeSteps = 0x0C;
@@ -48,6 +49,10 @@ constexpr uint32_t kDrawListSize = 0x18;
 constexpr uint32_t kDrawListRoom = 0;
 constexpr uint32_t kDrawListCap = 0xC;
 constexpr uint32_t kStageX = 0x295DA4;  // float: the 640 Flash stage sits this far in on a widescreen
+
+// weapon and its data
+constexpr uint32_t kWeaponData = 0xEC;
+constexpr uint32_t kDataAimZoom = 0xB4;  // float: 1 for a weapon that does not aim
 
 // UI object, the front end the menu hooks get in ebp
 constexpr uint32_t kUi = 0x2D199C;

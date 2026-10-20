@@ -318,13 +318,16 @@ float psmain(O i) : SV_Depth {
 // from the scene's depth: occlusion pass, then a blur across and one down that multiplies it into the colour.
 // The sky is far: a pixel's samples there span less than one pixel and it stays lit
 const char* kAoHlsl = R"(
-cbuffer A : register(b1) { float4 proj; float4 zp; float4 vp; float4 opt; float4 fog; };
+cbuffer A : register(b1) { float4 proj; float4 zp; float4 vp; float4 opt; float4 fog; float4 fogcolor; };
+// stencil bit 7: a blended or alpha tested surface wrote the depth last, it counts as the far plane like the sky
 #ifdef MS
 Texture2DMS<float> depth : register(t0);
-float Raw(int2 p) { return depth.Load(p, 0); }
+Texture2DMS<uint2> stencil : register(t2);
+float Raw(int2 p) { return stencil.Load(p, 0).g & 0x80 ? 1 : depth.Load(p, 0); }
 #else
 Texture2D<float> depth : register(t0);
-float Raw(int2 p) { return depth.Load(int3(p, 0)); }
+Texture2D<uint2> stencil : register(t2);
+float Raw(int2 p) { return stencil.Load(int3(p, 0)).g & 0x80 ? 1 : depth.Load(int3(p, 0)); }
 #endif
 Texture2D<float2> ao : register(t1);
 float4 vs(uint id : SV_VertexID) : SV_Position {
@@ -443,16 +446,16 @@ float2 occlusion_blur(float4 pos : SV_Position) : SV_Target {
     float a = Smooth(pos.xy, z);
     return float2(a, z);
 }
-// fog: the game's, already drawn over the scene, fades the occlusion out as it thickens
+// the fog is already drawn: only the scene share under it is occluded, blended as colour * a + rgb
 float4 occlusion_apply(float4 pos : SV_Position) : SV_Target {
     float z;
     float a = Smooth(pos.xy, z);
     float fogged = min(saturate(fog.x * z + fog.y), fog.z);
-    return float4(lerp(a, 1, fogged).xxx, 1);
+    return float4(fogcolor.rgb * fogged * (1 - a), a);
 }
 )";
 constexpr int kAoTargets = 2;
-constexpr int kAoConstants = 20;  // kAoHlsl's b1
+constexpr int kAoConstants = 24;  // kAoHlsl's b1
 constexpr DXGI_FORMAT kAoFormat = DXGI_FORMAT_R16G16_FLOAT;
 constexpr float kAoRadius = 0.8f;    // world units, the engine's are metres
 constexpr float kAoMaxSpan = 0.15f;  // of the view's height, the most one pixel's samples may cover
@@ -468,7 +471,7 @@ D3D12_RECT ViewRect(const Viewport& v, const Target& t) {
     return r;
 }
 
-// b1 of kAoHlsl: proj, zp with the viewport's depth range, vp, opt (its step written per pass), fog
+// b1 of kAoHlsl: proj, zp with the viewport's depth range, vp, opt (its step written per pass), fog, fog colour
 void OcclusionConstants(const Viewport& v, const D3D12_RECT& r, const float p[4 * kOcclusionRects],
                         float c[kAoConstants]) {
     float zr = v.max_z - v.min_z;
@@ -476,16 +479,16 @@ void OcclusionConstants(const Viewport& v, const D3D12_RECT& r, const float p[4 
     float h = float(r.bottom - r.top);
     const float out[kAoConstants] = {p[0], p[1], p[2], p[3], p[4] * zr, v.min_z + p[5] * zr, 0, 0,
                                      float(r.left), float(r.top), w, h, kAoRadius, kAoMaxSpan * h, 0, 0,
-                                     p[8], p[9], p[10], 0};
+                                     p[8], p[9], p[10], 0, p[12], p[13], p[14], 0};
     std::memcpy(c, out, sizeof(out));
 }
 
-// dst = dst * src; the alpha the game's blends read stays
-void MultiplyBlend(D3D12_RENDER_TARGET_BLEND_DESC& b) {
+// dst = dst * src.a + src; the alpha the game's blends read stays
+void OcclusionBlend(D3D12_RENDER_TARGET_BLEND_DESC& b) {
     b.BlendEnable = TRUE;
-    b.SrcBlend = D3D12_BLEND_ZERO;
+    b.SrcBlend = D3D12_BLEND_ONE;
     b.SrcBlendAlpha = D3D12_BLEND_ZERO;
-    b.DestBlend = D3D12_BLEND_SRC_COLOR;
+    b.DestBlend = D3D12_BLEND_SRC_ALPHA;
     b.DestBlendAlpha = D3D12_BLEND_ONE;
     b.BlendOp = D3D12_BLEND_OP_ADD;
     b.BlendOpAlpha = D3D12_BLEND_OP_ADD;
@@ -732,10 +735,12 @@ struct PsoKey {
     uint32_t cull;
     uint32_t ccw;
     uint32_t fill;
+    uint32_t unclipped;  // no clipping at the near and far planes: NearDepthHlsl draws
     int32_t zbias;
     float zslope;
     uint32_t rtfmt;
-    uint32_t msaa;  // samples of a multisampled target, 0 without
+    uint32_t msaa;     // samples of a multisampled target, 0 without
+    uint32_t ao_mark;  // the stencil holds ambient occlusion's mark, not the game's state
 };
 
 // Blit's settings past the source and its rectangle
@@ -778,6 +783,7 @@ struct DrawShaders {
     uint64_t vh = 0;
     uint64_t pkey = 0;
     uint64_t ph = 0;
+    bool near_depth = false;  // the pixel shader writes the depth: NearDepthHlsl
     ID3DBlob* vs_code = nullptr;
     ID3DBlob* ps_code = nullptr;
 };
@@ -906,9 +912,9 @@ private:
         const char* entry;
         DXGI_FORMAT out = kAoFormat;
         uint32_t samples = 1;   // of the target written
-        bool multiply = false;  // onto that target
+        bool blend = false;  // onto that target, OcclusionBlend
         D3D12_CPU_DESCRIPTOR_HANDLE rtv;
-        ID3D12Resource* depth = nullptr;  // the scene's, read by the first pass
+        ID3D12Resource* depth = nullptr;  // the scene's depth and stencil, read by the first pass
         bool ms_depth = false;
         ID3D12Resource* src = nullptr;  // the pass before
         float step_x = 0;
@@ -940,11 +946,14 @@ private:
     void EnsurePixelShader(const PixelKey& pk, DrawShaders& sh);
     void BuildPipelineKey(const State& s, const Assembled& a, uint64_t vh, uint64_t ph, PsoKey& k);
     void KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k);
+    bool MarksOcclusion(const PsoKey& k) const;
     ID3D12PipelineState* EnsurePipeline(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps);
     void FillPipelineDesc(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps, D3D12_GRAPHICS_PIPELINE_STATE_DESC& d) const;
+    float TargetScale() const;  // host pixels per console pixel of the bound target
+    float RenderTargetShift(const State& s, const DrawShaders& sh) const;
     void UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
                          GuestExtent size, DrawConstants& c);
-    void FillTextureConstants(const State& s, const DrawTextures& stages, DrawConstants& c);
+    void FillTextureConstants(const State& s, const DrawShaders& sh, const DrawTextures& stages, DrawConstants& c);
     void FillTexelConstants(int i, const TextureDesc& d, const DrawTextures& stages, DrawConstants& c);
     void CaptureDraw(const State& s, uint32_t prim, uint32_t count, const PsoKey& k, const DrawConstants& c,
                      const DrawTextures& stages);
@@ -956,7 +965,7 @@ private:
     void SetTextureViewsAndSamplers(const State& s, const Assembled& a, DrawTextures& stages);
     uint32_t EnsureStageSamplers(const State& s, const DrawTextures& stages, bool clamp);
     void SetViewportScissor(const State& s, uint32_t gw);
-    void SetBlendFactorStencilRef(const State& s);
+    void SetBlendFactorStencilRef(const State& s, const PsoKey& k);
     void DrawGeometry(const Assembled& a);
     void UploadVertexBuffers(const Assembled& a);
     // shaders by source hash: Compile returns the bytecode and sets hash
@@ -1126,6 +1135,7 @@ private:
     D3D12_RESOURCE_STATES ao_state_[kAoTargets] = {};
     uint32_t ao_w_ = 0;
     uint32_t ao_h_ = 0;
+    uint64_t ao_frame_ = 0;  // presents_ plus one when the pass last ran, 0 before it ever did
     // surfaces locked without a wait: copies in flight, the newest finished one goes to guest memory
     struct Late {
         ComPtr<ID3D12Resource> rb[kFrames];
@@ -1652,6 +1662,7 @@ void D3D12Backend::Occlusion(const State& s, const float p[4 * kOcclusionRects])
     D3D12_RECT rect = ViewRect(v, *rt);
     if (rect.right <= rect.left || rect.bottom <= rect.top || v.max_z <= v.min_z) return;
     if (!EnsureOcclusionTargets(rt->w, rt->h)) return;
+    ao_frame_ = presents_ + 1;
     if (cap_) {
         CapStep(s.rt);
         fprintf(cap_, "%04u occlusion rt %08X ds %08X\n", cap_i_++, s.rt.data, s.zs.data);
@@ -1665,7 +1676,7 @@ void D3D12Backend::Occlusion(const State& s, const float p[4 * kOcclusionRects])
     AoPass raw{.entry = entry, .rtv = OcclusionView(0), .depth = ds->res.Get(), .ms_depth = samples > 1};
     AoPass across{.entry = "occlusion_blur", .rtv = OcclusionView(1), .src = ao_[0].Get(), .step_x = 1};
     D3D12_CPU_DESCRIPTOR_HANDLE scene = Cpu(rtv_heap_.Get(), rt->view, rtv_inc_);
-    AoPass down{.entry = "occlusion_apply", .out = rt->fmt, .samples = Ms(*rt), .multiply = true, .rtv = scene,
+    AoPass down{.entry = "occlusion_apply", .out = rt->fmt, .samples = Ms(*rt), .blend = true, .rtv = scene,
                 .src = ao_[1].Get(), .step_y = 1};
     bound_rt_ = bound_ds_ = nullptr;
     Transition(ds->res.Get(), ds->state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -1719,23 +1730,25 @@ ID3D12PipelineState* D3D12Backend::EnsureOcclusionPipeline(const AoPass& a) {
     ID3DBlob* ps = Compile(text, a.entry, "ps_5_0", h);
     if (!vs || !ps) return nullptr;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC d = FullScreenPipelineDesc(vs, ps, a.out);
-    if (a.multiply) MultiplyBlend(d.BlendState.RenderTarget[0]);
+    if (a.blend) OcclusionBlend(d.BlendState.RenderTarget[0]);
     d.SampleDesc.Count = a.samples;
     if (FAILED(dev_->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) return nullptr;
     return pso.Get();
 }
 
-// t0 the scene's depth, t1 the pass before, t2 and t3 unused
+// t0 the scene's depth, t1 the pass before, t2 the scene's stencil, t3 unused
 void D3D12Backend::OcclusionViews(uint32_t slot, const AoPass& a) {
-    ID3D12Resource* res[4] = {a.depth, a.src, nullptr, nullptr};
-    const DXGI_FORMAT fmt[4] = {DXGI_FORMAT_R24_UNORM_X8_TYPELESS, kAoFormat, kBgra, kBgra};
+    ID3D12Resource* res[4] = {a.depth, a.src, a.depth, nullptr};
+    const DXGI_FORMAT fmt[4] = {DXGI_FORMAT_R24_UNORM_X8_TYPELESS, kAoFormat, DXGI_FORMAT_X24_TYPELESS_G8_UINT,
+                                kBgra};
     for (int i = 0; i < 4; i++) {
-        bool ms = i == 0 && res[i] && a.ms_depth;
+        bool ms = res[i] && res[i] == a.depth && a.ms_depth;
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
         sv.Format = res[i] ? fmt[i] : kBgra;
         sv.ViewDimension = ms ? D3D12_SRV_DIMENSION_TEXTURE2DMS : D3D12_SRV_DIMENSION_TEXTURE2D;
         sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         if (!ms) sv.Texture2D.MipLevels = 1;
+        if (!ms && res[i] && i == 2) sv.Texture2D.PlaneSlice = 1;  // the stencil plane
         dev_->CreateShaderResourceView(res[i], &sv, Cpu(srv_heap_.Get(), slot + i, srv_inc_));
     }
 }
@@ -2118,7 +2131,7 @@ void D3D12Backend::FillPipelineDesc(const PsoKey& k, ID3DBlob* vs, ID3DBlob* ps,
     d.RasterizerState.FrontCounterClockwise = k.ccw;
     d.RasterizerState.DepthBias = k.zbias;
     d.RasterizerState.SlopeScaledDepthBias = k.zslope;
-    d.RasterizerState.DepthClipEnable = TRUE;
+    d.RasterizerState.DepthClipEnable = !k.unclipped;
     d.RasterizerState.MultisampleEnable = k.msaa != 0;
     FillDepthStencilDesc(k, d.DepthStencilState);
     d.PrimitiveTopologyType = TopologyType(k.topo);
@@ -2159,6 +2172,7 @@ ID3D12Resource* D3D12Backend::BindTargetTexture(const State& s, int stage, const
     if (&t == draw_ds_) return nullptr;
     bool feedback = &t == draw_rt_;
     stages.rt[stage] = true;
+    info.flags |= kTexTarget;
     if (!t.depth && LatchCpuWrite(t)) {
         Surface su;
         su.header = s.textures[size_t(stage)];
@@ -2501,6 +2515,27 @@ bool D3D12Backend::BindStageTexturesAndTargets(const State& s, DrawTextures& sta
 }
 
 constexpr uint64_t kPixelKeySalt = 0x9E3779B97F4A7C15ull;
+constexpr uint64_t kNearDepthSalt = 0xC2B2AE3D27D4EB4Full;
+
+// c-38, the viewport scale; its w the plane d3d8.cpp NearDepth set, 0 without
+constexpr uint32_t kViewportScaleRow = 58;
+
+bool NearDepth(const State& s) { return s.vsc[kViewportScaleRow][3] > 0; }
+
+// The pixel shader writes the depth. Past the near plane it is the rasterizer's, squeezed behind a small front share
+// of the range; nearer, the parts the plane would clip fill that share linearly in view depth (pos.w), in order
+std::string NearDepthHlsl(std::string src) {
+    const std::string head = "float4 main(VOut i, bool front : SV_IsFrontFace) : SV_Target {\n";
+    const std::string with_depth =
+        "float4 main(VOut i, bool front : SV_IsFrontFace, out float depth : SV_Depth) : SV_Target {\n"
+        "    const float front_share = 1.0 / 4096;\n"
+        "    float plane = c[" + std::to_string(kViewportScaleRow) + "].w;\n"
+        "    float past = front_share + (1 - front_share) * i.pos.z;\n"
+        "    depth = i.pos.w < plane ? front_share * i.pos.w / plane : past;\n";
+    size_t at = src.find(head);
+    if (at != std::string::npos) src.replace(at, head.size(), with_depth);
+    return src;
+}
 
 // sets sh.ph and sh.ps_code, compiling the shader on a cache miss
 void D3D12Backend::EnsurePixelShader(const PixelKey& pk, DrawShaders& sh) {
@@ -2511,7 +2546,9 @@ void D3D12Backend::EnsurePixelShader(const PixelKey& pk, DrawShaders& sh) {
         sh.ps_code = blobs_[sh.ph].Get();
         return;
     }
-    sh.ps_code = Compile(PixelHlsl(pk), "main", "ps_5_0", sh.ph);
+    std::string src = PixelHlsl(pk);
+    if (sh.near_depth) src = NearDepthHlsl(std::move(src));
+    sh.ps_code = Compile(src, "main", "ps_5_0", sh.ph);
     shader_src_[sh.pkey ^ kPixelKeySalt] = sh.ph;
 }
 
@@ -2529,6 +2566,36 @@ void KeyBlend(const State& s, PsoKey& k) {
 
 constexpr float kDepth24Max = 16777215.0f;  // 2^24 minus 1: a 24 bit depth buffer's units per 1.0
 
+// stencil bit 7 marks a blended or alpha tested surface for the occlusion pass; the game never tests stencil
+constexpr uint32_t kAoStencilBit = 0x80;
+constexpr uint32_t kStencilAlways = 0x207;    // D3DCMP_ALWAYS
+constexpr uint32_t kStencilKeep = 0x1E00;     // D3DSTENCILOP_KEEP
+constexpr uint32_t kStencilReplace = 0x1E01;  // D3DSTENCILOP_REPLACE
+constexpr uint32_t kAlphaKillEnable = 4;      // D3DTALPHAKILL_ENABLE
+
+bool D3D12Backend::MarksOcclusion(const PsoKey& k) const {
+    if (ao_frame_ == 0 || ao_frame_ != presents_ || k.sten || !k.zen || !k.zwrite) return false;
+    return bound_ds_ && bound_ds_->gw == guest_w_ && bound_ds_->gh == guest_h_;
+}
+
+void KeyOcclusionMark(PsoKey& k) {
+    k.ao_mark = 1;
+    k.sten = 1;
+    k.sfunc = kStencilAlways;
+    k.swmask = kAoStencilBit;
+    k.sfail = kStencilKeep;
+    k.szfail = kStencilKeep;
+    k.spass = kStencilReplace;
+}
+
+bool Translucent(const State& s, const PsoKey& k) {
+    if (k.blend || SimpleState(s, kMAlphaTestEnable)) return true;
+    for (int i = 0; i < 4; i++) {
+        if (s.textures[i] && s.tss[size_t(i)][kTssAlphaKill] == kAlphaKillEnable) return true;
+    }
+    return false;
+}
+
 void D3D12Backend::KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k) {
     k.zen = s.rs[kRsZEnable] != 0;
     if (k.zen) {
@@ -2544,6 +2611,7 @@ void D3D12Backend::KeyDepthStencil(const State& s, const Assembled& a, PsoKey& k
         k.szfail = SimpleState(s, kMStencilZFail);
         k.spass = SimpleState(s, kMStencilPass);
     }
+    if (MarksOcclusion(k)) KeyOcclusionMark(k);
     // polygon offset: bias in depth buffer units, the target is always 24 bit; the slope is per console pixel,
     // and an upscaled target's pixels are smaller
     if (a.topology == Topology::Triangles && SimpleState(s, kMSolidOffsetEnable)) {
@@ -2557,6 +2625,7 @@ void KeyRasterizer(const State& s, const Assembled& a, PsoKey& k) {
     k.cull = cull != 0 && a.topology == Topology::Triangles;
     k.ccw = cull == kCullCw;  // culling clockwise leaves counter clockwise as the front
     k.fill = s.rs[kRsFillMode];
+    k.unclipped = NearDepth(s);
 }
 
 void D3D12Backend::BuildPipelineKey(const State& s, const Assembled& a, uint64_t vh, uint64_t ph, PsoKey& k) {
@@ -2619,11 +2688,8 @@ constexpr float kBlurTapTexels = 7.0f / 6;  // console texels between a blur's t
 void D3D12Backend::FillTexelConstants(int i, const TextureDesc& d, const DrawTextures& stages, DrawConstants& c) {
     c.texsize[i][0] = float(d.width);
     c.texsize[i][1] = float(d.height);
-    // the console samples pixels at integer positions, D3D12 half a pixel on: targets are read half a texel back
     if (!stages.rt[i]) return;
     float k = stages.k[i];
-    c.texsize[i][2] = -0.5f / (float(d.width) * k);
-    c.texsize[i][3] = -0.5f / (float(d.height) * k);
     // a 3 console texel box per tap keeps the console chain's glow width and brightness; a blur's taps
     // are 7/6 texel apart, so each covers that much, a sample per host texel
     if (stages.wide[i] > 0) {
@@ -2637,10 +2703,12 @@ void D3D12Backend::FillTexelConstants(int i, const TextureDesc& d, const DrawTex
     }
 }
 
-void D3D12Backend::FillTextureConstants(const State& s, const DrawTextures& stages, DrawConstants& c) {
+void D3D12Backend::FillTextureConstants(const State& s, const DrawShaders& sh, const DrawTextures& stages,
+                                        DrawConstants& c) {
     for (int i = 0; i < 4; i++) {
         TextureDesc d;
         if (s.textures[size_t(i)] && Describe(s.textures[size_t(i)], d)) FillTexelConstants(i, d, stages, c);
+        if (stages.rt[i]) c.rtshift[i] = RenderTargetShift(s, sh);
         const auto& t = s.tss[size_t(i)];
         c.bump[i][0] = Bits(t[kTssBumpEnvMat00]);
         c.bump[i][1] = Bits(t[kTssBumpEnvMat01]);
@@ -2764,6 +2832,19 @@ void FillLightConstants(const State& s, const FixedKey& fk, DrawConstants& c) {
     }
 }
 
+float D3D12Backend::TargetScale() const {
+    const Target* t = bound_rt_ ? bound_rt_ : bound_ds_;
+    if (!t || !t->gw) return 1;
+    return float(t->w) / float(t->gw);
+}
+
+// the XDK's screen space offset puts the console's positions half a pixel right and down of the host's, unless a
+// program writes them without c-37; render target reads move back that far (TexUv)
+float D3D12Backend::RenderTargetShift(const State& s, const DrawShaders& sh) const {
+    bool offset = !sh.prog || ReadsViewportOffset(s.vs->program);
+    return offset ? -0.5f * TargetScale() : 0.0f;
+}
+
 void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const PsoKey& k, const DrawTextures& stages,
                                    GuestExtent size, DrawConstants& c) {
     Alloc vc = Upload(sizeof(s.vsc), 256);
@@ -2773,7 +2854,7 @@ void D3D12Backend::UploadConstants(const State& s, const DrawShaders& sh, const 
     FillFogConstants(s, c);
     FillCombinerConstants(s, c);
     if (ext_) ext_->Constants(reinterpret_cast<float(*)[4]>(vc.cpu), c.ext, bound_rt_, k.blend ? k.src : 1);
-    FillTextureConstants(s, stages, c);
+    FillTextureConstants(s, sh, stages, c);
     if (sh.fixed_transform) {
         FillTransformConstants(s, size, c);
         FillLightConstants(s, sh.fk, c);
@@ -2900,11 +2981,13 @@ void D3D12Backend::SetViewportScissor(const State& s, uint32_t gw) {
     cl_->RSSetScissorRects(1, &rect);
 }
 
-void D3D12Backend::SetBlendFactorStencilRef(const State& s) {
+void D3D12Backend::SetBlendFactorStencilRef(const State& s, const PsoKey& k) {
     float bf[4];
     Color(SimpleState(s, kMBlendColor), bf);
     cl_->OMSetBlendFactor(bf);
-    cl_->OMSetStencilRef(SimpleState(s, kMStencilRef) & 0xFF);
+    uint32_t ref = SimpleState(s, kMStencilRef) & 0xFF;
+    if (k.ao_mark) ref = Translucent(s, k) ? kAoStencilBit : 0;
+    cl_->OMSetStencilRef(ref);
 }
 
 D3D_PRIMITIVE_TOPOLOGY PrimitiveTopology(const Assembled& a) {
@@ -2982,7 +3065,8 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     DrawTextures stages;
     if (!BindStageTexturesAndTargets(s, stages)) return;
     PixelKey pk = MakePixelKey(s, stages.info);
-    sh.pkey = Hash(&pk, sizeof(pk));
+    sh.near_depth = NearDepth(s);
+    sh.pkey = Hash(&pk, sizeof(pk)) ^ (sh.near_depth ? kNearDepthSalt : 0);
     EnsurePixelShader(pk, sh);
     if (!sh.vs_code || !sh.ps_code) return;
 
@@ -3008,7 +3092,7 @@ void D3D12Backend::Draw(const State& s, uint32_t prim, uint32_t start, uint32_t 
     // texture views and samplers, viewport and scissor, blend factor and stencil reference
     SetTextureViewsAndSamplers(s, a, stages);
     SetViewportScissor(s, size.w);
-    SetBlendFactorStencilRef(s);
+    SetBlendFactorStencilRef(s, k);
 
     // geometry
     DrawGeometry(a);

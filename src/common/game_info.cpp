@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <iterator>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -17,6 +18,7 @@
 #include "common/monitor.h"
 #include "common/mouse_keyboard.h"
 #include "common/options.h"
+#include "core/log.h"
 
 namespace game {
 
@@ -84,19 +86,54 @@ bool Message(void* hwnd, uint32_t msg, uintptr_t wp, intptr_t lp, intptr_t* resu
     return false;
 }
 
+// A pad that has not reported yet can read its triggers half pressed (Proton, Steam Deck): fire held.
+// A trigger counts once seen released.
+void UpdateTriggerRest(int port, input::Pad& pad) {
+    constexpr uint8_t kReleased = 0x20;
+    constexpr int kLeftTrigger = 6;
+    static std::atomic<uint8_t> rested[4];  // bit 0 left trigger, bit 1 right
+    static std::atomic<bool> logged;
+    if (port < 0 || port > 3) return;
+    if (!pad.connected) {
+        rested[port] = 0;
+        return;
+    }
+    for (int t = 0; t < 2; t++) {
+        uint8_t& value = pad.analog[kLeftTrigger + t];
+        uint8_t bit = uint8_t(1u << t);
+        if (value <= kReleased) rested[port] |= bit;
+        if (rested[port] & bit) continue;
+        if (!logged.exchange(true)) LOGR("input: controller %d trigger pressed before a release, ignored", port + 1);
+        value = 0;
+    }
+}
+
 // port 0 has the keyboard; the game sees no input while the panel is open
 void Pad(int port, input::Pad& pad) {
+    UpdateTriggerRest(port, pad);
     input::SeenPad(pad);
     if (port == 0) pad.connected = true;
     if (app::MenuOpen()) pad = input::Pad{.connected = pad.connected};
     else if (port == 0) input::Keyboard(pad);
 }
 
-// no vibration while the keyboard and mouse are in use
+// the vibration at the rumble intensity, none while the keyboard and mouse are in use
 void Rumble(int port, uint16_t& left, uint16_t& right) {
-    if (port != 0 || !input::KeyboardActive()) return;
-    left = 0;
-    right = 0;
+    uint32_t percent = std::clamp(Opt().rumble_intensity, 10u, 200u);
+    if (port == 0 && input::KeyboardActive()) percent = 0;
+    left = uint16_t(std::min(left * percent / 100, 0xFFFFu));  // past 100% the motors saturate
+    right = uint16_t(std::min(right * percent / 100, 0xFFFFu));
+}
+
+// the Windows display language when the game has it, else English
+std::string SystemLanguage() {
+    switch (PRIMARYLANGID(GetUserDefaultUILanguage())) {
+        case LANG_FRENCH: return "fra";
+        case LANG_GERMAN: return "deu";
+        case LANG_ITALIAN: return "ita";
+        case LANG_SPANISH: return "esp";
+        default: return "int";
+    }
 }
 
 // what the options list cannot hold
@@ -105,9 +142,11 @@ void Load(const void* table) {
     Options& o = Opt();
     o.monitor = t["monitor"].value_or(o.monitor);
     o.mouse_sensitivity = float(t["mouse_sensitivity"].value_or(double(o.mouse_sensitivity)));
+    o.controller_sensitivity = float(t["controller_sensitivity"].value_or(double(o.controller_sensitivity)));
+    o.gyro_sensitivity = float(t["gyro_sensitivity"].value_or(double(o.gyro_sensitivity)));
     std::string language = t["language"].value_or(o.language);
     bool known = std::find(std::begin(kLanguages), std::end(kLanguages), language) != std::end(kLanguages);
-    if (known) o.language = language;
+    if (known || language == "auto") o.language = language;
     if (const toml::table* keys = t["keys"].as_table())
         for (auto&& [id, value] : *keys)
             if (auto v = value.value<std::string>()) o.keys[std::string(id.str())] = *v;
@@ -125,6 +164,8 @@ void Save(void* table) {
     const Options& o = Opt();
     t.insert("monitor", o.monitor);
     t.insert("mouse_sensitivity", double(o.mouse_sensitivity));
+    t.insert("controller_sensitivity", double(o.controller_sensitivity));
+    t.insert("gyro_sensitivity", double(o.gyro_sensitivity));
     t.insert("language", o.language);
     toml::table keys;
     for (const auto& [id, value] : o.keys) keys.insert(id, value);
@@ -138,8 +179,10 @@ Options& Opt() {
     return o;
 }
 
+std::string ResolveLanguage(const std::string& setting) { return setting == "auto" ? SystemLanguage() : setting; }
+
 const std::string& BootLanguage() {
-    static const std::string language = Opt().language;
+    static const std::string language = ResolveLanguage(Opt().language);
     return language;
 }
 
@@ -170,7 +213,12 @@ const app::GameInfo app::kGame = {
                 {"draw_distance", nullptr, &game::Opt().draw_distance},
                 {"ambient_occlusion", nullptr, &game::Opt().ambient_occlusion},
                 {"viewmodel_fov", nullptr, &game::Opt().viewmodel_fov},
-                {"audio_output", nullptr, &game::Opt().audio_output}},
+                {"audio_output", nullptr, &game::Opt().audio_output},
+                {"controller_hold_aim", &game::Opt().controller_hold_aim, nullptr},
+                {"aim_assist", &game::Opt().aim_assist, nullptr},
+                {"rumble_intensity", nullptr, &game::Opt().rumble_intensity},
+                {"gyro_aiming", &game::Opt().gyro_aiming, nullptr},
+                {"menu_animations", &game::Opt().menu_animations, nullptr}},
     .load = game::Load,
     .save = game::Save,
     .init = game::Init,

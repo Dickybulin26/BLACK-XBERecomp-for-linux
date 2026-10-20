@@ -127,14 +127,15 @@ X86_EXTERN_FUNC(__imp__sub_000D6C00);
 
 namespace {
 
-enum class Film { None, Shown, Menu };
+enum class Film { None, Shown, Logos, Menu };
 Film g_film = Film::None;
 
 Film CurrentFilm() {
     uint32_t game = R32(kGame);
     uint32_t film = game ? R32(game + kCurrentFilm) : kFilms;
     bool menu = film < kFilms && G<uint8_t>(kFilmTable + film * kFilmEntry + kFilmBehindMenu);
-    return menu ? Film::Menu : Film::Shown;
+    if (menu) return Film::Menu;
+    return film == kLogoFilm ? Film::Logos : Film::Shown;
 }
 
 // corners are x, y pairs: x (axis 0) or y (axis 1) scaled about the middle
@@ -147,7 +148,8 @@ void ScaleQuad(float* q, int axis, float scale) {
 }  // namespace
 
 // The film quad covers the frame, shown as wide as the output. A menu's film stays stretched, no wider than 16:9.
-// Filled, a film is made taller about the middle so it fills the screen, top and bottom cut; else narrowed to 4:3
+// Filled, a film is made taller about the middle so it fills the screen, top and bottom cut; else narrowed to 4:3.
+// The EA intro is always 4:3: filling cuts its text
 X86_FUNC(sub_000D6C00) {
     uint32_t quads = R32(ctx.esp + 8);
     if (g_film == Film::None && g_inset > 0) {
@@ -159,7 +161,7 @@ X86_FUNC(sub_000D6C00) {
     float* q = &G<float>(ctx.eax);
     float saved[4] = {q[0], q[1], q[2], q[3]};
     if (g_film == Film::Menu) ScaleQuad(q, 0, std::min(1.0f, 16.0f / 9.0f / game::Aspect()));
-    else if (game::Opt().fmv_scale == 0) ScaleQuad(q, 1, 1 / game::Narrow());
+    else if (g_film == Film::Shown && game::Opt().fmv_scale == 0) ScaleQuad(q, 1, 1 / game::Narrow());
     else ScaleQuad(q, 0, game::Narrow());
     __imp__sub_000D6C00(ctx, base);
     std::copy(saved, saved + 4, q);

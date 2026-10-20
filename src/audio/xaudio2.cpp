@@ -22,7 +22,9 @@ namespace audio {
 
 namespace {
 
+// the console's stereo downmix in the DOLBY image: centre and back pair at -3 dB, no sub
 constexpr float kCentreFold = 0.707f;
+constexpr float kBackFold = 0.707f;
 constexpr DWORD kFront = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY;
 constexpr DWORD kBack = SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT;
 constexpr DWORD kSide = SPEAKER_SIDE_LEFT | SPEAKER_SIDE_RIGHT;
@@ -94,11 +96,11 @@ std::vector<float> SurroundMatrix(DWORD mask, uint32_t outputs) {
     return m;
 }
 
-// L = FL + kCentreFold C + BL and R = FR + kCentreFold C + BR without the sub, on the first two outputs.
-// Mono, or a mono master, hears the average of the two.
+// L = FL + kCentreFold C + kBackFold BL and R = FR + kCentreFold C + kBackFold BR without the sub, on the first two
+// outputs. Mono, or a mono master, hears the average of the two, as the console's mono downmix.
 std::vector<float> FoldToStereo(uint32_t outputs, bool mono) {
-    static const float kLeft[kChannels] = {1, 0, kCentreFold, 0, 1, 0};
-    static const float kRight[kChannels] = {0, 1, kCentreFold, 0, 0, 1};
+    static const float kLeft[kChannels] = {1, 0, kCentreFold, 0, kBackFold, 0};
+    static const float kRight[kChannels] = {0, 1, kCentreFold, 0, 0, kBackFold};
     std::vector<float> m(outputs * kChannels, 0.0f);
     bool average = mono || outputs == 1;
     for (uint32_t s = 0; s < kChannels; s++) {
@@ -123,8 +125,11 @@ uint32_t MasterOutputs(IXAudio2MasteringVoice* master) {
 DWORD MasterMask(IXAudio2MasteringVoice* master, uint32_t outputs) {
     DWORD mask = 0;
     master->GetChannelMask(&mask);
-    // a stereo device that names no speakers is the front pair
-    if (!mask && outputs == 2) mask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+    if (mask) return mask;
+    // a device that names no speakers has the usual layout for its channel count
+    if (outputs == 2) return SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+    if (outputs == 6) return kFront | kBack;
+    if (outputs == 8) return kFront | kBack | kSide;
     return mask;
 }
 
@@ -143,7 +148,7 @@ void ApplyMatrix(Output& out) {
     bool own_speakers = g_surround && HasSurround(mask);
     std::vector<float> m = own_speakers ? SurroundMatrix(mask, outputs) : FoldToStereo(outputs, g_mono);
     out.voice->SetOutputMatrix(out.master, kChannels, outputs, m.data());
-    LOGI("audio: %s output, %u device channels", OutputName(), outputs);
+    LOGI("audio: %s output, %u device channels, speakers %lX", OutputName(), outputs, mask);
 }
 
 std::optional<Output> Open() {
@@ -159,8 +164,12 @@ std::optional<Output> Open() {
 void Pump(Output& out, const std::function<void(float*, uint32_t)>& render) {
     out.voice->Start();
     constexpr uint32_t kFrames = kRate / 100;
-    constexpr uint32_t kSlots = 4;
+    constexpr uint32_t kMinQueued = 3;
+    constexpr uint32_t kMaxQueued = 10;
+    // one slot more than can be queued, so the one rendered is never one XAudio2 still reads
+    constexpr uint32_t kSlots = kMaxQueued + 1;
     std::vector<float> bufs(kSlots * kFrames * kChannels);
+    uint32_t depth = kMinQueued;
     bool stopped = false;
     for (uint32_t n = 0;;) {
         if (g_mode_changed.exchange(false)) ApplyMatrix(out);
@@ -175,7 +184,12 @@ void Pump(Output& out, const std::function<void(float*, uint32_t)>& render) {
         }
         XAUDIO2_VOICE_STATE st;
         out.voice->GetState(&st, XAUDIO2_VOICE_NOSAMPLESPLAYED);
-        if (st.BuffersQueued >= 3) {
+        // a starved voice crackles: queue one buffer more each time, up to kMaxQueued
+        if (n && !st.BuffersQueued && depth < kMaxQueued) {
+            depth++;
+            LOGI("audio: output starved, queueing %u ms", depth * 10);
+        }
+        if (st.BuffersQueued >= depth) {
             Sleep(2);
             continue;
         }

@@ -18,6 +18,7 @@ using namespace layout;
 
 namespace d3d {
 void ViewScale(float xy);
+void NearDepth(float plane);
 }
 
 namespace {
@@ -150,10 +151,8 @@ void MenuTick(X86Context& ctx, uint8_t*) {
 // what a step made once a frame at 30 becomes over the real frame: factor to the power of this
 static float FrameShare() { return FrameTime() / G<float>(kGameFrameTime); }
 
-// weapon and its data
-constexpr uint32_t kWeaponData = 0xEC;
+// weapon
 constexpr uint32_t kWeaponOwner = 0xF0;
-constexpr uint32_t kDataAimZoom = 0xB4;
 // player
 constexpr uint32_t kPlayerForward = 0xF0;
 constexpr uint32_t kPlayerEye = 0x100;
@@ -172,10 +171,11 @@ void ZoomStep(X86Context& ctx, uint8_t*) {
 }
 
 constexpr float kHalf = 3.14159265f / 360.0f;
+constexpr uint32_t kGameFov = 70;  // the view's and the viewmodel's
 
-// tangent of a setting's half angle over that of the game's 70 degrees
+// tangent of a setting's half angle over that of the game's
 static float Widen(uint32_t degrees) {
-    return std::tan(std::clamp(degrees, 45u, 140u) * kHalf) / std::tan(70 * kHalf);
+    return std::tan(std::clamp(degrees, 45u, 140u) * kHalf) / std::tan(kGameFov * kHalf);
 }
 
 static float g_gun = 1.0f;  // the gun's picture over the view's
@@ -193,13 +193,20 @@ void FieldOfView(X86Context& ctx, uint8_t*) {
     if (view != 1) fov = std::atan(std::tan(fov * kHalf) * view) / kHalf;
 }
 
-// The list of the first person models, gun, arms and muzzle mesh: drawn at the viewmodel setting
+constexpr float kNearPlane = 0.08f;  // every camera's, set once at renderer init
+
+// The list of the first person models, gun, arms and muzzle mesh: drawn at the viewmodel setting.
+// Wider than the game's 70 it shows parts nearer than the near plane, which are kept
 X86_EXTERN_FUNC(__imp__sub_00176F60);
 X86_FUNC(sub_00176F60) {
-    bool gun = g_gun != 1 && ctx.esi == R32(kDisplay) + kDisplayDrawLists + kGunDrawList * kDrawListSize;
-    if (gun) d3d::ViewScale(g_gun);
+    bool list = ctx.esi == R32(kDisplay) + kDisplayDrawLists + kGunDrawList * kDrawListSize;
+    bool scale = list && g_gun != 1;
+    bool keep_near = list && game::Opt().viewmodel_fov > kGameFov;
+    if (scale) d3d::ViewScale(g_gun);
+    if (keep_near) d3d::NearDepth(kNearPlane);
     __imp__sub_00176F60(ctx, base);
-    if (gun) d3d::ViewScale(1);
+    if (scale) d3d::ViewScale(1);
+    if (keep_near) d3d::NearDepth(0);
 }
 
 static uint32_t Player() { return R32(kWorld) + kWorldPlayer; }
@@ -287,6 +294,9 @@ void SwayEnd(X86Context&, uint8_t*) {
     for (int i = 0; i < 2; i++) G<float>(g_sway + i * 4) = g_sway_share[i];
     g_sway = 0;
 }
+
+// The player's move speed eases to the stick's by at most a fixed step a frame: the step of a frame at 30
+void MoveEase(X86Context& ctx, uint8_t*) { ctx.xmm[1].f[0] *= FrameShare(); }
 
 static float Dt() { return G<float>(R32(kWorld) + kTimerDt); }
 
@@ -493,6 +503,16 @@ X86_FUNC(sub_001690D0) {
 }
 bool ShardTick(X86Context&, uint8_t*) { return g_shard_tick; }
 
+// The sound manager counts its glass shard sound slots (0x2AB27C) and four timers down once a call, made for 30 calls
+// a second: they count once a game frame, or shard sounds pile up at high frame rates
+bool SoundCountdownTick(X86Context&, uint8_t*) {
+    static float ticks;
+    ticks += FrameShare();
+    if (ticks < 1) return false;
+    ticks -= 1;
+    return true;
+}
+
 // xmm1 the gain of a shard's turn a frame
 void ShardSpinGain(X86Context& ctx, uint8_t*) { ctx.xmm[1].f[0] *= FrameShare(); }
 
@@ -509,7 +529,7 @@ void ShardStep(X86Context& ctx, uint8_t*) {
 
 // LOD and draw distances reach this many times farther: each compare sees a distance that much shorter or a
 // limit that much longer. Characters, props, pickups, ground cover, particles and bullet holes
-static float Reach() { return float(std::clamp(game::Opt().draw_distance, 1u, 8u)); }
+static float Reach() { return float(std::clamp(game::Opt().draw_distance, 1u, 16u)); }
 void DistanceShorter(X86Context& ctx, uint8_t*) { ctx.xmm[0].f[0] /= Reach(); }
 void DistanceShorterSquared(X86Context& ctx, uint8_t*) { ctx.xmm[0].f[0] /= Reach() * Reach(); }
 void LimitLonger(X86Context& ctx, uint8_t*) { ctx.xmm[0].f[0] *= Reach(); }

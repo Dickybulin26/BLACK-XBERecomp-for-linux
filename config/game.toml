@@ -6,6 +6,7 @@ title = 0x45410083
 entry = 0x25A3F
 xdk = 5849
 out = "generated/game"
+library = "Black.dll"  # <exe>.dll, which the executable delay loads
 partitions = 64
 code_sections = [".text", "DSOUND", "WMADEC", "XMV", "XGRPH", "D3D", "XPP"]
 
@@ -225,6 +226,7 @@ WSASend                                              = 0
 WSASendTo                                            = 0
 WSAStartup                                           = 0
 XAudioDownloadEffectsImage                           = 0
+XGetAudioFlags                                       = 0x22AD2
 XInitDevices                                         = 0x27D058
 XInputClose                                          = 0x27DDEC
 XInputGetState                                       = 0x27DDF8
@@ -387,6 +389,11 @@ at = 0x79327
 call = "JointTurnBack"
 
 [[hook]]
+at = 0x14B4F5
+call = "SoundCountdownTick"
+on_false = 0x14B559
+
+[[hook]]
 at = 0x169160
 call = "ShardTick"
 on_false = 0x169167
@@ -540,9 +547,9 @@ call = "OptionsMenu"
 at = 0x124374
 call = "ExitMenu"
 
-# src/game/exit_menu.cpp, a page loaded, before its Prepare
+# src/game/exit_menu.cpp, the Flash sound callback
 [[hook]]
-at = 0x12466D
+at = 0x11A610
 call = "ExitMenuSounds"
 
 [[hook]]
@@ -575,3 +582,18 @@ after = true
 at = 0x1F813B
 call = "GameLanguage"
 after = true
+
+# src/game/mouse.cpp, the right stick look at the controller sensitivity
+[[hook]]
+at = 0x1BD69F
+call = "StickLook"
+
+# src/game/hooks.cpp, the 0.8 step of the move speed
+[[hook]]
+at = 0x1CC672
+call = "MoveEase"
+
+# src/game/menu_animations.cpp, before the Flash player's tick
+[[hook]]
+at = 0x124624
+call = "MenuAnimations"

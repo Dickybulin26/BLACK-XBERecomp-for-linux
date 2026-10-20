@@ -24,30 +24,103 @@ using flash::Type;
 
 // degrees a count at sensitivity 1
 constexpr float kDegrees = 0.05f;
+constexpr float kHalfRadians = 3.14159265f / 360.0f;  // degrees to radians of half the angle
 
 // the player's controller: yaw positive left, pitch positive down, in degrees
 constexpr uint32_t kControllerYaw = 0x18;
 constexpr uint32_t kControllerPitch = 0x1C;
 constexpr uint32_t kControllerAimWanted = 0x45;
 constexpr uint32_t kControllerAimHeld = 0x104;
+constexpr uint32_t kControllerInvertY = 0x101;  // the game's invert look, for the stick
+// degrees a second at full stick, and the power the stick is raised to
+constexpr uint32_t kControllerYawSpeed = 0xB8;
+constexpr uint32_t kControllerPitchSpeed = 0xBC;
+constexpr uint32_t kControllerCurve = 0xC8;
+// the right stick this frame, turn left and turn up; the gun's sway reads them as player+0x5C8 and +0x5CC
+constexpr uint32_t kControllerStickYaw = 0xD8;
+constexpr uint32_t kControllerStickPitch = 0xDC;
 
-// esi the player's controller, xmm2 the zoom scale. The game adds the stick, clamps the pitch and wraps the yaw
-// after this.
-void MouseLook(X86Context& ctx, uint8_t*) {
-    float dx;
-    float dy;
-    if (!input::TakeMouse(dx, dy)) return;
-    float scale = kDegrees * ctx.xmm[2].f[0];
-    G<float>(ctx.esi + kControllerYaw) -= std::remainder(dx * scale, 360.0f);
-    G<float>(ctx.esi + kControllerPitch) += dy * scale;
+// camera: the view's degrees, as FieldOfView leaves them
+constexpr uint32_t kCamera = 0x2D12B8;
+constexpr uint32_t kCameraFov = 0x750;
+
+// the view's tangent over that of the view from the hip: a count turns the same share of the view zoomed or not
+float ViewZoom() {
+    uint32_t camera = R32(kCamera);
+    float fov = camera ? G<float>(camera + kCameraFov) : 0.0f;
+    if (!(fov > 0 && fov < 180)) return 1.0f;
+    float hip = float(std::clamp(game::Opt().fov, 45u, 140u));  // the range FieldOfView takes
+    return std::tan(fov * kHalfRadians) / std::tan(hip * kHalfRadians);
 }
 
-// false with the keyboard or mouse used last: no pull of the view to a target, no shots bent to one
-bool AimAssist(X86Context&, uint8_t*) { return !input::KeyboardActive(); }
+// the stick deflection that turns as far through the game's curve, full the turn of a full stick
+float Deflection(float degrees, float full, float curve) {
+    if (!(full > 0)) return 0.0f;
+    float x = std::min(std::fabs(degrees) / full, 1.0f);
+    if (curve > 0) x = std::pow(x, 1.0f / curve);
+    return std::copysign(x, degrees);
+}
 
-// ebx the player's controller past the game's toggle aim, scopes and all
+// The gun sways with the right stick: while it rests, the stick that turns the view as fast as the mouse did
+void UpdateSway(X86Context& ctx, float yaw, float pitch) {
+    uint32_t c = ctx.esi;
+    if (G<float>(c + kControllerStickYaw) != 0 || G<float>(c + kControllerStickPitch) != 0) return;
+    float frame = ctx.xmm[2].f[0] * G<float>(ctx.edi + kTimerDt);  // edi the world, xmm2 the stick's zoom scale
+    float curve = G<float>(c + kControllerCurve);
+    G<float>(c + kControllerStickYaw) = Deflection(yaw, frame * G<float>(c + kControllerYawSpeed), curve);
+    G<float>(c + kControllerStickPitch) = Deflection(-pitch, frame * G<float>(c + kControllerPitchSpeed), curve);
+}
+
+// esi the player's controller. The game adds the stick, clamps the pitch and wraps the yaw after this.
+void MouseLook(X86Context& ctx, uint8_t*) {
+    float yaw = 0.0f;
+    float pitch = 0.0f;
+    float dx;
+    float dy;
+    if (input::TakeMouse(dx, dy)) {
+        yaw -= dx * kDegrees;
+        pitch += dy * kDegrees;
+    }
+    float gyro_yaw;
+    float gyro_pitch;
+    if (input::TakeGyro(gyro_yaw, gyro_pitch)) {
+        bool invert = G<uint8_t>(ctx.esi + kControllerInvertY);
+        yaw += gyro_yaw;
+        pitch += invert ? -gyro_pitch : gyro_pitch;
+    }
+    if (yaw == 0.0f && pitch == 0.0f) return;
+    float zoom = ViewZoom();
+    yaw = std::remainder(yaw * zoom, 360.0f);
+    pitch *= zoom;
+    G<float>(ctx.esi + kControllerYaw) += yaw;
+    G<float>(ctx.esi + kControllerPitch) += pitch;
+    UpdateSway(ctx, yaw, pitch);
+}
+
+// false with the keyboard or mouse used last or the option off: no pull of the view to a target, no shots bent to one
+bool AimAssist(X86Context&, uint8_t*) { return game::Opt().aim_assist && !input::KeyboardActive(); }
+
+// the look update: xmm3 the stick's yaw speed, xmm0 its pitch speed, before the zoom scale and frame time
+void StickLook(X86Context& ctx, uint8_t*) {
+    if (input::KeyboardActive()) return;
+    float sensitivity = game::Opt().controller_sensitivity;
+    ctx.xmm[3].f[0] *= sensitivity;
+    ctx.xmm[0].f[0] *= sensitivity;
+}
+
+// the game drops the aim of a weapon whose zoom is 1 each frame (0x1BB143)
+static bool CanAim(uint32_t weapon) {
+    uint32_t data = R32(weapon + kWeaponData);
+    return data && G<float>(data + kDataAimZoom) != 1.0f;
+}
+
+constexpr uint32_t kHoldAimWeapon = 0x18;  // esp offset of the weapon at the hook
+
+// ebx the player's controller past the game's toggle aim, scopes and all.
+// A toggle on a weapon that cannot aim would stay on and aim the next weapon.
 void HoldAim(X86Context& ctx, uint8_t*) {
-    if (!game::Opt().hold_aim || !input::KeyboardActive()) return;
+    bool hold = input::KeyboardActive() ? game::Opt().hold_aim : game::Opt().controller_hold_aim;
+    if (!hold && CanAim(R32(ctx.esp + kHoldAimWeapon))) return;
     G<uint8_t>(ctx.ebx + kControllerAimWanted) = G<uint8_t>(ctx.ebx + kControllerAimHeld);
 }
 

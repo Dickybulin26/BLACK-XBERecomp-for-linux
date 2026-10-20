@@ -8,7 +8,7 @@ This port was created using the [Xbox XBE Recomp](https://github.com/TGP482/Xbox
 
 ## Installation (Windows)
 - Put your game files in the `assets` folder. This can be an ISO, or the extracted data files, of the USA or Europe release.
-- Run `BLACK.exe`.
+- Run `BLACK.exe`. The first start compiles the game's code for your PC, this only happens once.
 - Recomp settings can be adjusted in the in-game options menu while the game is running, or through the Settings overlay, which is opened with F10 by default.
 - Linux users: skip this and follow [Linux (Proton)](#linux-proton) below.
 <img width="1920" height="1080" alt="{5852D359-24A0-48C8-9319-07C3A619E355}" src="https://github.com/user-attachments/assets/e0156eb8-c1b5-49d9-ab93-3abb46bf5f47" />
@@ -149,13 +149,14 @@ Still stuck? Include in your issue: distro + GPU + driver version, Proton versio
 - **Multisample Antialiasing (MSAA)** - Enables 2x, 4x or 8x MSAA to smooth jagged edges while preserving a sharp image.
 - **Subpixel Morphological Antialiasing (SMAA)** - Enables SMAA to smooth jagged edges across the whole frame with a softer image. SMAA also smooths alpha-tested edges such as fences and foliage, and can be combined with MSAA.
 - **Anisotropic Filtering** - Forces the selected anisotropic filtering level on all textures.
-- **Draw Distance** - Increases the level of detail and draw distances past the game's values: 2x, 4x or 8x.
+- **Draw Distance** - Increases the level of detail and draw distances past the game's values: 2x, 4x, 8x, 12x or 16x.
 - **Ambient Occlusion** - Adds screen space ambient occlusion, creating soft contact shadows where surfaces meet. Choose between SSAO and GTAO.
 - **Reload Blur** - Toggles the blur effect while reloading.
 
 ### Input
 - **Mouse and Keyboard** - Full keyboard and mouse support with raw input, adjustable sensitivity, inverted look and rebindable controls.
-- **Controller** - Controller with SDL3 support. 
+- **Controller** - Controller with SDL3 support and additional features.
+- **Gyro Aiming** - Adds gyro aiming for controllers with motion sensors, such as the DualSense, DualShock 4 and Switch Pro Controller, with adjustable sensitivity. Works together with the right stick.
 
 ### General
 - **Skip Intro** - Skips the intro logos.
@@ -178,7 +179,7 @@ Still stuck? Include in your issue: distro + GPU + driver version, Proton versio
 - **Memory**
   - 4 GB
 - **Storage**
-  - 2 GB for the game files and saves
+  - 3 GB for the game files, the compiled game code and saves
 
 ## Building
 ### 1. Clone the Repository

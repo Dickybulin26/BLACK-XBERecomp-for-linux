@@ -182,20 +182,26 @@ uint32_t RowOf(const Place& at, const Voice& v, uint32_t c, uint32_t bin) {
     return kDry;
 }
 
-// Black pans its in-game sounds over bins 19 to 24, the six speakers again in speaker order (its music lists 0 1 4 5
-// 2 3 where they list 19 20 23 24 21 22), which its DSP image passes on to the speakers
-constexpr uint32_t kSpeakerCopy = 19;
-bool SpeakerCopy(uint32_t bin) { return bin >= kSpeakerCopy && bin < kSpeakerCopy + 6; }
+// The speaker each mix bin reaches. Bins 0 to 5 are the speakers, the crosstalk bins join the front and back pairs.
+// Black's effects image adds bins 19 to 24 to FL FR BL BR C LFE (effects 7 to 12) and bins 25 and 13 to 16 to
+// FL FR BL BR C inverted (effects 2 to 6), with the filters the game sets at boot (0xB8950 through SetEffectData).
+// The game's pan law sends a negative gain to the inverted bins (0x8D480). The rest are effect sends.
+constexpr int8_t kNoSpeaker = -1;
+constexpr int8_t kBinSpeaker[32] = {
+    audio::FrontLeft, audio::FrontRight, audio::Centre, audio::Sub, audio::BackLeft, audio::BackRight,
+    audio::FrontLeft, audio::FrontRight, audio::BackLeft, audio::BackRight,
+    kNoSpeaker, kNoSpeaker, kNoSpeaker,
+    audio::FrontRight, audio::BackLeft, audio::BackRight, audio::Centre,
+    kNoSpeaker, kNoSpeaker,
+    audio::FrontLeft, audio::FrontRight, audio::BackLeft, audio::BackRight, audio::Centre, audio::Sub,
+    audio::FrontLeft,
+    kNoSpeaker, kNoSpeaker, kNoSpeaker, kNoSpeaker, kNoSpeaker, kNoSpeaker};
+constexpr uint32_t kInvertedBins = 1u << 13 | 1u << 14 | 1u << 15 | 1u << 16 | 1u << 25;
 
-// the speaker a bin plays on: bins 0 to 5 and their copy are the speakers, the crosstalk bins join the front and
-// back pairs
-static_assert(audio::Centre == 2 && audio::Sub == 3 && audio::BackRight == 5);
+// slots that reach one speaker add up, as the voice processor and the effects add into the bins
 void PlaceBin(uint32_t bin, float x, float g[kOuts]) {
-    static const audio::Speaker kCrosstalk[4] = {audio::FrontLeft, audio::FrontRight, audio::BackLeft,
-                                                 audio::BackRight};
-    if (SpeakerCopy(bin)) bin -= kSpeakerCopy;
-    uint32_t to = bin < kCrosstalkFrontLeft ? bin : kCrosstalk[bin - kCrosstalkFrontLeft];
-    g[to] = std::max(g[to], x);
+    bool inverted = kInvertedBins >> bin & 1;
+    g[kBinSpeaker[bin]] += inverted ? -x : x;
 }
 
 // Gain of each row on host left and right and into the reverb.
@@ -212,7 +218,8 @@ Gains Levels(const Voice& v, const Place& at) {
     // muted speaker bins do not count: such a voice is heard through its effect send
     for (uint32_t s = 0; s < n; s++) {
         uint32_t b = bin[s];
-        bool speaker = (b < 10 && b != 3) || (SpeakerCopy(b) && b != kSpeakerCopy + 3);
+        int8_t to = kBinSpeaker[b];
+        bool speaker = to != kNoSpeaker && to != audio::Sub;
         speakers |= speaker && v.bin_mb[b] > -10000;
     }
     Gains g;
@@ -225,7 +232,7 @@ Gains Levels(const Voice& v, const Place& at) {
                 g.send[r] += std::ldexp(x, -g_bin_headroom[b]);
                 continue;
             }
-            if (speakers && b > 9 && !SpeakerCopy(b)) continue;  // other effect sends
+            if (speakers && kBinSpeaker[b] == kNoSpeaker) continue;  // other effect sends
             float* row = g.out[r];
             if (speakers) {
                 PlaceBin(b, x, row);

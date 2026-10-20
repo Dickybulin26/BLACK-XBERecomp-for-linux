@@ -60,8 +60,8 @@ constexpr std::pair<ImGuiCol, ImVec4> kPanelColors[] = {
 
 constexpr uint32_t kAnisoValues[] = {0, 2, 4, 8, 16};
 const char* const kAnisoNames[] = {"GAME DEFAULT", "2x", "4x", "8x", "16x"};
-constexpr uint32_t kDistances[] = {1, 2, 4, 8};
-const char* const kDistanceNames[] = {"GAME DEFAULT", "2x", "4x", "8x"};
+constexpr uint32_t kDistances[] = {1, 2, 4, 8, 12, 16};
+const char* const kDistanceNames[] = {"GAME DEFAULT", "2x", "4x", "8x", "12x", "16x"};
 constexpr uint32_t kMsaaValues[] = {0, 2, 4, 8};
 const char* const kMsaaNames[] = {"OFF", "2x", "4x", "8x"};
 constexpr uint32_t kAoValues[] = {0, 1, 2};
@@ -71,7 +71,8 @@ const char* const kFmvScaleNames[] = {"FILL", "4:3"};
 constexpr uint32_t kAudioOutputs[] = {audio::kOutputAuto, audio::kOutputMono, audio::kOutputStereo,
                                       audio::kOutputSurround};
 const char* const kAudioOutputNames[] = {"AUTOMATIC", "MONO", "2.0 STEREO", "5.1 SURROUND"};
-const char* const kLanguageNames[] = {"ENGLISH", "FRENCH", "GERMAN", "ITALIAN", "SPANISH"};  // as game::kLanguages
+// "auto" then game::kLanguages
+const char* const kLanguageNames[] = {"AUTOMATIC", "ENGLISH", "FRENCH", "GERMAN", "ITALIAN", "SPANISH"};
 constexpr uint32_t kFpsCaps[] = {30, 60, 75, 90, 120, 144, 165, 240, 360, kFpsCapRefresh, 0};
 
 int StepIndex(int index, int step, int count) {
@@ -228,7 +229,9 @@ void Changed(bool display) {
 enum RowId { kDisplayMode, kResolution, kRenderResolution, kMaxFps, kVsync, kFpsCounter, kAniso, kReloadBlur,
              kSkipIntros, kSensitivity, kInvertMouse, kWalkSpeed, kFov, kViewmodelFov, kHoldAim, kDrawDistance, kMsaa,
              kAmbientOcclusion, kAudioOutput, kHdrOutput, kMonitor, kLanguage, kSmaa,
-             kPauseOnFocusLoss, kFmvScale };
+             kPauseOnFocusLoss, kFmvScale,
+             kControllerHoldAim, kControllerSensitivity, kRumbleIntensity, kMenuAnimations,
+             kGyroAiming, kGyroSensitivity, kAimAssist };
 
 using rows::Kind;
 using rows::Row;
@@ -255,6 +258,7 @@ constexpr Row kSettingsRows[] = {
     {Kind::Value, kReloadBlur, "RELOAD BLUR"},
     {Kind::Heading, -1, "GENERAL"},
     {Kind::Value, kSkipIntros, "SKIP INTROS"},
+    {Kind::Value, kMenuAnimations, "MENU ANIMATIONS"},
     {Kind::Value, kPauseOnFocusLoss, "PAUSE ON FOCUS LOSS"},
     {Kind::Value, kLanguage, "LANGUAGE"},
     {Kind::Value, kAudioOutput, "AUDIO OUTPUT"},
@@ -276,6 +280,16 @@ const std::vector<Row>& InputRows() {
     return list;
 }
 
+constexpr Row kControllerRows[] = {
+    {Kind::Heading, -1, "CONTROLLER"},
+    {Kind::Value, kControllerHoldAim, "HOLD TO AIM"},
+    {Kind::Value, kAimAssist, "AIM ASSIST"},
+    {Kind::Value, kControllerSensitivity, "SENSITIVITY"},
+    {Kind::Value, kRumbleIntensity, "RUMBLE INTENSITY"},
+    {Kind::Value, kGyroAiming, "GYRO AIMING"},
+    {Kind::Value, kGyroSensitivity, "GYRO SENSITIVITY"},
+};
+
 // the setting an ON / OFF row flips, nullptr for any other row
 bool* ToggleFlag(Settings& s, int id) {
     game::Options& o = game::Opt();
@@ -286,9 +300,13 @@ bool* ToggleFlag(Settings& s, int id) {
         case kReloadBlur: return &o.reload_blur;
         case kSmaa: return &o.smaa;
         case kSkipIntros: return &o.skip_intros;
+        case kMenuAnimations: return &o.menu_animations;
         case kPauseOnFocusLoss: return &o.pause_on_focus_loss;
         case kInvertMouse: return &o.invert_mouse;
         case kHoldAim: return &o.hold_aim;
+        case kControllerHoldAim: return &o.controller_hold_aim;
+        case kGyroAiming: return &o.gyro_aiming;
+        case kAimAssist: return &o.aim_assist;
         default: return nullptr;
     }
 }
@@ -445,7 +463,19 @@ bool StepGraphicsRow(int id, int step, Settings& s, char (&text)[64]) {
     }
 }
 
-// the general, mouse and keyboard rows that are no ON / OFF, stepped first
+// both sensitivity rows: 0.1 to 5.0 in steps of 0.1
+void StepSensitivity(float& value, int step, char (&text)[64]) {
+    if (step) {
+        int tenths = StepRange(int(std::lround(value * 10.0f)), 1, 50, 1, step);
+        value = float(tenths) / 10.0f;
+    }
+    std::snprintf(text, sizeof(text), "%.1f", value);
+}
+
+// the setting of kLanguageNames[i]
+const char* LanguageCode(int i) { return i ? game::kLanguages[i - 1] : "auto"; }
+
+// the general, mouse and keyboard and controller rows that are no ON / OFF, stepped first
 void StepInputRow(int id, int step, char (&text)[64]) {
     game::Options& o = game::Opt();
     switch (id) {
@@ -453,12 +483,18 @@ void StepInputRow(int id, int step, char (&text)[64]) {
             std::snprintf(text, sizeof(text), "%s", kAudioOutputNames[StepTable(kAudioOutputs, o.audio_output, step)]);
             break;
         case kSensitivity:
-            // 0.1 to 5.0 in steps of 0.1
-            if (step) {
-                int tenths = StepRange(int(std::lround(o.mouse_sensitivity * 10.0f)), 1, 50, 1, step);
-                o.mouse_sensitivity = float(tenths) / 10.0f;
-            }
-            std::snprintf(text, sizeof(text), "%.1f", o.mouse_sensitivity);
+            StepSensitivity(o.mouse_sensitivity, step, text);
+            break;
+        case kControllerSensitivity:
+            StepSensitivity(o.controller_sensitivity, step, text);
+            break;
+        case kGyroSensitivity:
+            StepSensitivity(o.gyro_sensitivity, step, text);
+            break;
+        case kRumbleIntensity:
+            // 10% to 200% in steps of 10
+            if (step) o.rumble_intensity = uint32_t(StepRange(int(o.rumble_intensity), 10, 200, 10, step));
+            std::snprintf(text, sizeof(text), "%u%%", o.rumble_intensity);
             break;
         case kWalkSpeed:
             // 10% to 100% in steps of 5
@@ -466,14 +502,15 @@ void StepInputRow(int id, int step, char (&text)[64]) {
             std::snprintf(text, sizeof(text), "%u%%", o.walk_speed);
             break;
         case kLanguage: {
-            int count = int(std::size(game::kLanguages));
+            int count = int(std::size(kLanguageNames));
             int i = 0;
-            while (i < count - 1 && o.language != game::kLanguages[i]) i++;
+            while (i < count - 1 && o.language != LanguageCode(i)) i++;
             if (step) {
                 i = StepIndex(i, step, count);
-                o.language = game::kLanguages[i];
+                o.language = LanguageCode(i);
             }
-            const char* format = o.language == game::BootLanguage() ? "%s" : "%s (RESTART)";
+            bool restart = game::ResolveLanguage(o.language) != game::BootLanguage();
+            const char* format = restart ? "%s (RESTART)" : "%s";
             std::snprintf(text, sizeof(text), format, kLanguageNames[i]);
             break;
         }
@@ -502,27 +539,45 @@ std::string KeyText(std::string keys) {
     return keys;
 }
 
-const char* const kPages[] = {"RECOMP SETTINGS", "MOUSE AND KEYBOARD"};
+const char* const kPages[] = {"RECOMP SETTINGS", "MOUSE AND KEYBOARD", "CONTROLLER"};
 constexpr int kSettingsPage = 0;
 constexpr int kKeyboardPage = 1;
+constexpr int kControllerPage = 2;
+
+// the MOUSE AND KEYBOARD page's values, its binds aside
+void CopyKeyboardValues(game::Options& to, const game::Options& from) {
+    to.mouse_sensitivity = from.mouse_sensitivity;
+    to.invert_mouse = from.invert_mouse;
+    to.hold_aim = from.hold_aim;
+    to.walk_speed = from.walk_speed;
+}
+
+void CopyControllerValues(game::Options& to, const game::Options& from) {
+    to.controller_hold_aim = from.controller_hold_aim;
+    to.aim_assist = from.aim_assist;
+    to.controller_sensitivity = from.controller_sensitivity;
+    to.rumble_intensity = from.rumble_intensity;
+    to.gyro_aiming = from.gyro_aiming;
+    to.gyro_sensitivity = from.gyro_sensitivity;
+}
 
 void RestoreDefaults(int page) {
     game::Options& o = game::Opt();
+    if (page == kControllerPage) {
+        CopyControllerValues(o, game::Options{});
+        Save();
+        return;
+    }
     if (page == kKeyboardPage) {
-        o.mouse_sensitivity = game::Options{}.mouse_sensitivity;
-        o.invert_mouse = false;
-        o.hold_aim = true;
-        o.walk_speed = game::Options{}.walk_speed;
+        CopyKeyboardValues(o, game::Options{});
         input::ResetBindings();
         return;
     }
     game::Options keep = o;
     Get() = Settings{};
     o = game::Options{};
-    o.mouse_sensitivity = keep.mouse_sensitivity;
-    o.invert_mouse = keep.invert_mouse;
-    o.hold_aim = keep.hold_aim;
-    o.walk_speed = keep.walk_speed;
+    CopyKeyboardValues(o, keep);
+    CopyControllerValues(o, keep);
     o.keys = keep.keys;
     Changed(true);
 }
@@ -808,6 +863,10 @@ const rows::Row* rows::Page(int page, size_t* count) {
     if (page == kKeyboardPage) {
         *count = InputRows().size();
         return InputRows().data();
+    }
+    if (page == kControllerPage) {
+        *count = std::size(kControllerRows);
+        return kControllerRows;
     }
     static const std::vector<Row> rows = [] {
         std::vector<Row> out(std::begin(kSettingsRows), std::end(kSettingsRows));
