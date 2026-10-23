@@ -27,3 +27,4 @@ black.toml
 # Local temporary folder
 .local
 vkd3d-proton.cache.write
+vkd3d-proton.cache
